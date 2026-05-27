@@ -2,7 +2,7 @@
 
 ## System Overview
 
-A 3D-printed robotic hand controlled by MediaPipe video tracking. A friend handles the vision/MediaPipe side and sends data over UART. The Basys3 FPGA (Artix-7 XC7A35T, 100MHz) receives the data, runs a Kalman filter for motion smoothing, drives 8 MG996R servos via PWM, and reads servo position feedback via an AD7124-8 ADC.
+A 3D-printed robotic hand controlled by MediaPipe video tracking. A friend handles the vision/MediaPipe side and sends data over UART. The Basys3 FPGA (Artix-7 XC7A35T, 100MHz) receives the data, runs a Kalman filter for motion smoothing, drives 9 MG996R servos via PWM, and reads servo position feedback via an AD7124-8 ADC.
 
 ### Signal Chain
 
@@ -13,14 +13,14 @@ MediaPipe (friend's code)
     v
 Basys3 FPGA
     |
-    |-- 8x PWM (3.3V) --> ADUM1400 isolators --> 5V PWM --> MG996R servos
+    |-- 9x PWM (3.3V) --> ADUM1400 isolators --> 5V PWM --> MG996R servos
     |
     |-- SPI (3.3V) --> MAX14850 isolator --> AD7124-8 ADC <-- servo feedback (analog)
     |
     |-- UART TX (readback to friend's system for charts/analysis)
 ```
 
-### Servo Mapping (8 servos)
+### Servo Mapping (9 servos)
 
 | Servo | Joint | PWM Pin |
 |-------|-------|---------|
@@ -32,6 +32,7 @@ Basys3 FPGA
 | 5 | Thumb (finger tension) | JB1 |
 | 6 | Wrist rotation | JB2 |
 | 7 | Elbow extension | JB3 |
+| 8 | Thumb torsion (inward) | JA4 |
 
 ### Hardware Components
 
@@ -39,7 +40,7 @@ Basys3 FPGA
 - **2x ADUM1400** — digital isolators, level-shift PWM from 3.3V to 5V
 - **DC2468A** — 12V to 5V step-down for servo power (8A)
 - **ADP165** — 5V to 3.3V LDO for ADC-side logic
-- **AD7124-8** — 24-bit sigma-delta ADC, reads 8 servo feedback channels
+- **AD7124-8** — 24-bit sigma-delta ADC, reads 9 servo feedback channels (AIN0-AIN8)
 - **MAX14850** — SPI isolator between FPGA and ADC
 - **MG996R** — high-torque servos with analog feedback pin
 
@@ -47,22 +48,22 @@ Basys3 FPGA
 
 ## Communication Protocol
 
-10-byte UART frames at 115200 baud, 8N1:
+11-byte UART frames at 115200 baud, 8N1:
 
 ```
-| Byte 0      | Bytes 1-8         | Byte 9   |
+| Byte 0      | Bytes 1-9         | Byte 10  |
 |-------------|-------------------|----------|
-| Direction   | ServoAngle 1..8   | Checksum |
+| Direction   | ServoAngle 1..9   | Checksum |
 ```
 
 - **Direction = 0xFF**: write angles to servos
 - **Direction = 0xFE**: read current angles back (FPGA responds with a frame)
-- **Angles**: 0-180 degrees, one byte per servo, pinky to elbow
-- **Checksum**: XOR of bytes 0-8. Receiver XORs all 10 bytes — result must be 0x00 for valid frame
+- **Angles**: 0-180 degrees, one byte per servo, pinky to thumb-torsion
+- **Checksum**: XOR of bytes 0-9. Receiver XORs all 11 bytes — result must be 0x00 for valid frame
 
 ### Why XOR checksum?
 
-The sender computes `checksum = byte0 XOR byte1 XOR ... XOR byte8` and puts it in byte 9. On the receiver: `byte0 XOR byte1 XOR ... XOR byte9` = anything XOR'd with itself cancels to zero. If any bit flipped during transfer, the result is non-zero and we drop the frame.
+The sender computes `checksum = byte0 XOR byte1 XOR ... XOR byte9` and puts it in byte 10. On the receiver: `byte0 XOR byte1 XOR ... XOR byte10` = anything XOR'd with itself cancels to zero. If any bit flipped during transfer, the result is non-zero and we drop the frame.
 
 ---
 
@@ -85,7 +86,7 @@ At 100MHz: 1ms = 100,000 counts, 2ms = 200,000 counts. The threshold is computed
 threshold = 100,000 + angle * 556
 ```
 
-Where 556 ≈ 100,000 / 180. The counter runs 0 to 1,999,999. Output is high when counter < threshold. Eight instances are generated in the top level.
+Where 556 ≈ 100,000 / 180. The counter runs 0 to 1,999,999. Output is high when counter < threshold. Nine instances are generated in the top level.
 
 ### uart_rx.vhd
 
@@ -105,17 +106,17 @@ Mirror of uart_rx. On `tx_start`, it sends: start bit (low for 868 clocks) → 8
 
 ### frame_rx.vhd
 
-Assembles 10-byte frames from individual UART bytes:
+Assembles 11-byte frames from individual UART bytes:
 
 1. **S_WAIT_DIR** — waits for 0xFF or 0xFE
-2. **S_RECV_DATA** — collects 8 angle bytes, XOR-accumulating checksum
-3. **S_RECV_CHKSUM** — receives checksum byte, verifies XOR of all 10 bytes = 0x00
+2. **S_RECV_DATA** — collects 9 angle bytes, XOR-accumulating checksum
+3. **S_RECV_CHKSUM** — receives checksum byte, verifies XOR of all 11 bytes = 0x00
 
 Has a 1ms timeout (100,000 clocks) — if a frame isn't completed in time, resets to S_WAIT_DIR. This prevents getting stuck if bytes are lost.
 
 ### frame_tx.vhd
 
-When direction = 0xFE (read request), serializes a response frame: 0xFE + 8 current angles + XOR checksum. Sends bytes one at a time through uart_tx, waiting for tx_busy to clear between bytes.
+When direction = 0xFE (read request), serializes a response frame: 0xFE + 9 current angles + XOR checksum. Sends bytes one at a time through uart_tx, waiting for tx_busy to clear between bytes.
 
 ### mailbox.vhd
 
@@ -127,7 +128,7 @@ Combinational mux: selects between mailbox angles (UART input) and demo_rom angl
 
 ### demo_rom.vhd
 
-Pre-programmed hand movement sequences stored as keyframes in ROM. Each keyframe = 8 angles + hold duration (in 20ms ticks). Sequences include:
+Pre-programmed hand movement sequences stored as keyframes in ROM. Each keyframe = 9 angles + hold duration (in 20ms ticks). Sequences include:
 - Open/close fist
 - Wave (wrist rotation)
 - Individual finger curls
@@ -157,19 +158,19 @@ Controls the AD7124-8 ADC. Two phases:
 3. Configure ADC_Control: full power, continuous conversion, DATA_STATUS enabled, internal reference
 4. Configure Setup 0: unipolar, input buffers, internal reference
 5. Filter 0: sinc3 filter, 50Hz output data rate (matches 20ms cycle)
-6. Configure channels 0-7: each maps AIN_N to AVSS (single-ended)
+6. Configure channels 0-8: each maps AIN_N to AVSS (single-ended)
 
 **Cyclic read** (continuous after init):
 - Sends read command for data register
 - Reads 3 data bytes + 1 status byte (status tells which channel)
 - Converts raw 24-bit ADC to 0-180 degree angle internally: `angle = (adc_raw * 180) >> 24`
-- After all 8 channels read, pulses `meas_valid`
+- After all 9 channels read, pulses `meas_valid`
 
 Register addresses and bit definitions from the no-OS driver at `~/no-OS/drivers/adc/ad7124/ad7124.h`.
 
 ### kalman_engine.vhd
 
-The core of the thesis. 2-state Kalman filter in Q16.16 fixed-point, time-multiplexed over 8 servo channels.
+The core of the thesis. 2-state Kalman filter in Q16.16 fixed-point, time-multiplexed over 9 servo channels.
 
 ---
 
@@ -215,7 +216,7 @@ When multiplying two Q16.16 numbers, the result is 64-bit with 32 fractional bit
 
 ### State RAM
 
-8 servos × 5 values each = 40 words of 32-bit RAM:
+9 servos × 5 values each = 45 words of 32-bit RAM:
 
 | Value | What it is |
 |-------|-----------|
@@ -292,12 +293,12 @@ p11 = -k1 × pp01 + pp11
 Writes the 5 updated values back to RAM. Converts Q16.16 position to 8-bit angle (shift right 16, clamp 0-180). Stores in output register.
 
 #### 6. S_NEXT_CH / S_OUTPUT
-Moves to next servo (0 through 7). After all 8 are processed, pushes all filtered angles to the PWM generators and returns to S_IDLE.
+Moves to next servo (0 through 8). After all 9 are processed, pushes all filtered angles to the PWM generators and returns to S_IDLE.
 
 ### Timing Budget
 
 Per servo: ~14 multiplies + 2 divisions + 14 adds ≈ 182 clock cycles.
-All 8 servos: ~1,456 cycles out of 2,000,000 available per 20ms tick = **0.07% utilization**.
+All 9 servos: ~1,638 cycles out of 2,000,000 available per 20ms tick = **0.08% utilization**.
 
 ### 3-State Upgrade Path
 
@@ -323,6 +324,7 @@ All Basys3 I/O pins are included in the design and constraint file. Unused pins 
 | RsRx | B18 | UART receive |
 | RsTx | A18 | UART transmit |
 | JA0-JA3 | J1, L2, J2, G2 | PWM servos 0-3 (pinky, ring, middle, index) |
+| JA4 | H1 | PWM servo 8 (thumb torsion) |
 | JB0-JB3 | A14, A16, B15, B16 | PWM servos 4-7 (thumb-palm, thumb-tension, wrist, elbow) |
 | JC0 (CS) | K17 | SPI chip select to AD7124 |
 | JC1 (MOSI) | M18 | SPI data out |
@@ -334,7 +336,7 @@ All Basys3 I/O pins are included in the design and constraint file. Unused pins 
 
 | Port | Drive State | Reason |
 |------|------------|--------|
-| JA4-JA7 | '0' | Pmod upper half, driven low |
+| JA5-JA7 | '0' | Pmod upper half (JA4 used for servo 8) |
 | JB4-JB7 | '0' | Pmod upper half, driven low |
 | JC4-JC7 | '0' | Pmod upper half, driven low |
 | seg[6:0], dp | '1' | 7-segment active-low, all segments off |
