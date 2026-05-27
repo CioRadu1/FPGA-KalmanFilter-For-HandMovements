@@ -140,7 +140,7 @@ begin
 						p00 <= state_ram(base + 2);
 						p01 <= state_ram(base + 3);
 						p11 <= state_ram(base + 4);
-						z_meas <= get_angle_q16(meas_reg, channel);
+						z_meas <= get_angle_q16(target_angles, channel);
 						fsm <= S_PREDICT_X;
 
 					when S_PREDICT_X =>
