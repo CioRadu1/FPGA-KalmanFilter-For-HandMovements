@@ -77,7 +77,7 @@ architecture Behavioral of basys3_top is
 	signal uart_tx_busy  : std_logic;
 
 	signal frame_dir        : std_logic_vector(7 downto 0);
-	signal frame_angles     : std_logic_vector(71 downto 0);
+	signal frame_angles     : std_logic_vector(63 downto 0);
 	signal frame_valid      : std_logic;
 	signal frame_chksum_err : std_logic;
 
@@ -85,12 +85,12 @@ architecture Behavioral of basys3_top is
 	signal ftx_data      : std_logic_vector(7 downto 0);
 	signal ftx_start     : std_logic;
 
-	signal mb_angles   : std_logic_vector(71 downto 0);
+	signal mb_angles   : std_logic_vector(63 downto 0);
 	signal mb_new      : std_logic;
 	signal mb_wr_valid : std_logic;
 
-	signal demo_angles   : std_logic_vector(71 downto 0);
-	signal target_angles : std_logic_vector(71 downto 0);
+	signal demo_angles   : std_logic_vector(63 downto 0);
+	signal target_angles : std_logic_vector(63 downto 0);
 
 	signal spi_start_sig  : std_logic;
 	signal spi_tx_data_s  : std_logic_vector(7 downto 0);
@@ -98,15 +98,15 @@ architecture Behavioral of basys3_top is
 	signal spi_busy_sig   : std_logic;
 	signal spi_done_sig   : std_logic;
 
-	signal meas_angles  : std_logic_vector(71 downto 0);
+	signal meas_angles  : std_logic_vector(63 downto 0);
 	signal meas_valid   : std_logic;
 	signal adc_cfg_done : std_logic;
 
-	signal kalman_out   : std_logic_vector(71 downto 0);
+	signal kalman_out   : std_logic_vector(63 downto 0);
 	signal kalman_valid : std_logic;
 	signal kalman_busy  : std_logic;
 
-	signal pwm_out       : std_logic_vector(8 downto 0);
+	signal pwm_out       : std_logic_vector(7 downto 0);
 	signal send_readback : std_logic;
 
 begin
@@ -114,7 +114,7 @@ begin
 	rst <= btnC;
 
 	-- unused outputs driven to safe states
-	JA4      <= pwm_out(8);
+	JA4      <= '0';
 	JA5      <= '0';
 	JA6      <= '0';
 	JA7      <= '0';
@@ -159,7 +159,7 @@ begin
 	led(5)  <= sw0;
 	led(6)  <= uart_tx_busy;
 	led(7)  <= spi_busy_sig;
-	led(15 downto 8) <= kalman_out(71 downto 64);
+	led(15 downto 8) <= kalman_out(63 downto 56);
 
 	------------------------------------------------------------------------
 	-- INSTANTIATIONS
@@ -290,12 +290,12 @@ begin
 			busy          => kalman_busy
 		);
 
-	gen_pwm : for i in 0 to 8 generate
+	gen_pwm : for i in 0 to 7 generate
 		u_pwm : entity work.pwm_gen
 			port map (
 				clk     => clk,
 				rst     => rst,
-				angle   => kalman_out((8-i)*8+7 downto (8-i)*8),
+				angle   => kalman_out((7-i)*8+7 downto (7-i)*8),
 				pwm_out => pwm_out(i)
 			);
 	end generate;

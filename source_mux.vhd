@@ -4,9 +4,9 @@ use IEEE.STD_LOGIC_1164.ALL;
 entity source_mux is
 	port (
 		demo_mode      : in  std_logic;
-		mailbox_angles : in  std_logic_vector(71 downto 0);
-		demo_angles    : in  std_logic_vector(71 downto 0);
-		target_angles  : out std_logic_vector(71 downto 0)
+		mailbox_angles : in  std_logic_vector(63 downto 0);
+		demo_angles    : in  std_logic_vector(63 downto 0);
+		target_angles  : out std_logic_vector(63 downto 0)
 	);
 end entity;
 

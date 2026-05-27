@@ -6,18 +6,18 @@ entity mailbox is
 		clk       : in  std_logic;
 		rst       : in  std_logic;
 		-- write side (from frame_rx)
-		wr_angles : in  std_logic_vector(71 downto 0);
+		wr_angles : in  std_logic_vector(63 downto 0);
 		wr_valid  : in  std_logic;
 		-- read side (servo cycle)
 		tick_20ms : in  std_logic;
-		rd_angles : out std_logic_vector(71 downto 0);
+		rd_angles : out std_logic_vector(63 downto 0);
 		rd_new    : out std_logic
 	);
 end entity;
 
 architecture rtl of mailbox is
-	signal buf_write     : std_logic_vector(71 downto 0) := (others => '0');
-	signal buf_read      : std_logic_vector(71 downto 0) := (others => '0');
+	signal buf_write     : std_logic_vector(63 downto 0) := (others => '0');
+	signal buf_read      : std_logic_vector(63 downto 0) := (others => '0');
 	signal new_pending   : std_logic := '0';
 begin
 
