@@ -7,10 +7,10 @@ entity kalman_engine is
 		clk           : in  std_logic;
 		rst           : in  std_logic;
 		tick_20ms     : in  std_logic;
-		target_angles : in  std_logic_vector(63 downto 0);
-		meas_angles   : in  std_logic_vector(63 downto 0);
+		target_angles : in  std_logic_vector(71 downto 0);
+		meas_angles   : in  std_logic_vector(71 downto 0);
 		meas_valid    : in  std_logic;
-		output_angles : out std_logic_vector(63 downto 0);
+		output_angles : out std_logic_vector(71 downto 0);
 		output_valid  : out std_logic;
 		busy          : out std_logic
 	);
@@ -18,7 +18,7 @@ end entity;
 
 -- 2-state Kalman filter: x = [position, velocity]
 -- Q16.16 fixed-point (32-bit signed)
--- time-multiplexed over 8 servo channels
+-- time-multiplexed over 9 servo channels
 
 architecture rtl of kalman_engine is
 
@@ -29,8 +29,8 @@ architecture rtl of kalman_engine is
 	constant R_NOISE  : signed(31 downto 0) := to_signed(65536, 32);  -- 1.0 deg^2
 	constant P_INIT   : signed(31 downto 0) := to_signed(655360, 32); -- 10.0
 
-	-- state RAM: 8 channels x 5 words (x0, x1, P00, P01, P11)
-	type ram_t is array (0 to 39) of signed(31 downto 0);
+	-- state RAM: 9 channels x 5 words (x0, x1, P00, P01, P11)
+	type ram_t is array (0 to 44) of signed(31 downto 0);
 	signal state_ram : ram_t := (others => (others => '0'));
 
 	signal initialized : std_logic := '0';
@@ -46,7 +46,7 @@ architecture rtl of kalman_engine is
 	);
 	signal fsm : fsm_t := S_INIT_RAM;
 
-	signal channel : unsigned(2 downto 0) := (others => '0');
+	signal channel : unsigned(3 downto 0) := (others => '0');
 
 	signal x0, x1           : signed(31 downto 0) := (others => '0');
 	signal p00, p01, p11    : signed(31 downto 0) := (others => '0');
@@ -58,8 +58,8 @@ architecture rtl of kalman_engine is
 	signal y_innov : signed(31 downto 0) := (others => '0');
 	signal z_meas  : signed(31 downto 0) := (others => '0');
 
-	signal meas_reg : std_logic_vector(63 downto 0) := (others => '0');
-	signal out_reg  : std_logic_vector(63 downto 0) := (others => '0');
+	signal meas_reg : std_logic_vector(71 downto 0) := (others => '0');
+	signal out_reg  : std_logic_vector(71 downto 0) := (others => '0');
 
 	function mul_q16(a : signed(31 downto 0); b : signed(31 downto 0))
 		return signed is
@@ -69,18 +69,18 @@ architecture rtl of kalman_engine is
 		return product(47 downto 16);
 	end function;
 
-	function ch_base(ch : unsigned(2 downto 0)) return integer is
+	function ch_base(ch : unsigned(3 downto 0)) return integer is
 	begin
 		return to_integer(ch) * 5;
 	end function;
 
-	function get_angle_q16(vec : std_logic_vector(63 downto 0);
-	                       ch  : unsigned(2 downto 0))
+	function get_angle_q16(vec : std_logic_vector(71 downto 0);
+	                       ch  : unsigned(3 downto 0))
 		return signed is
 		variable idx : integer;
 		variable ang : unsigned(7 downto 0);
 	begin
-		idx := (7 - to_integer(ch)) * 8;
+		idx := (8 - to_integer(ch)) * 8;
 		ang := unsigned(vec(idx+7 downto idx));
 		return to_signed(to_integer(ang) * 65536, 32);
 	end function;
@@ -120,7 +120,7 @@ begin
 							when 4     => state_ram(to_integer(init_addr)) <= P_INIT;
 							when others => state_ram(to_integer(init_addr)) <= (others => '0');
 						end case;
-						if init_addr = 39 then
+						if init_addr = 44 then
 							initialized <= '1';
 							fsm         <= S_IDLE;
 						else
@@ -211,14 +211,14 @@ begin
 							result_angle := 180;
 						end if;
 
-						out_reg((7 - to_integer(channel))*8 + 7 downto
-						        (7 - to_integer(channel))*8) <=
+						out_reg((8 - to_integer(channel))*8 + 7 downto
+						        (8 - to_integer(channel))*8) <=
 							std_logic_vector(to_unsigned(result_angle, 8));
 
 						fsm <= S_NEXT_CH;
 
 					when S_NEXT_CH =>
-						if channel = 7 then
+						if channel = 8 then
 							fsm <= S_OUTPUT;
 						else
 							channel <= channel + 1;

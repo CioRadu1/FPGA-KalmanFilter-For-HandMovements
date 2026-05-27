@@ -9,7 +9,7 @@ entity frame_rx is
 		rx_data      : in  std_logic_vector(7 downto 0);
 		rx_valid     : in  std_logic;
 		frame_dir    : out std_logic_vector(7 downto 0);
-		frame_angles : out std_logic_vector(63 downto 0);
+		frame_angles : out std_logic_vector(71 downto 0);
 		frame_valid  : out std_logic;
 		checksum_err : out std_logic
 	);
@@ -18,9 +18,9 @@ end entity;
 architecture rtl of frame_rx is
 	type state_t is (S_WAIT_DIR, S_RECV_DATA, S_RECV_CHKSUM);
 	signal state      : state_t := S_WAIT_DIR;
-	signal byte_count : unsigned(2 downto 0) := (others => '0');
+	signal byte_count : unsigned(3 downto 0) := (others => '0');
 	signal dir_reg    : std_logic_vector(7 downto 0) := (others => '0');
-	signal angles_reg : std_logic_vector(63 downto 0) := (others => '0');
+	signal angles_reg : std_logic_vector(71 downto 0) := (others => '0');
 	signal xor_acc    : std_logic_vector(7 downto 0) := (others => '0');
 
 	constant TIMEOUT_MAX : unsigned(16 downto 0) := to_unsigned(99999, 17);
@@ -62,10 +62,10 @@ begin
 					when S_RECV_DATA =>
 						if rx_valid = '1' then
 							timeout_cnt <= (others => '0');
-							angles_reg(63 - to_integer(byte_count)*8 downto
-							           56 - to_integer(byte_count)*8) <= rx_data;
+							angles_reg(71 - to_integer(byte_count)*8 downto
+							           64 - to_integer(byte_count)*8) <= rx_data;
 							xor_acc <= xor_acc xor rx_data;
-							if byte_count = 7 then
+							if byte_count = 8 then
 								state <= S_RECV_CHKSUM;
 							else
 								byte_count <= byte_count + 1;

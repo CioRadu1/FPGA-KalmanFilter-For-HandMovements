@@ -14,8 +14,8 @@ entity ad7124_ctrl is
 		spi_busy    : in  std_logic;
 		spi_done    : in  std_logic;
 		spi_cs_n    : out std_logic;
-		-- results: 8 measured angles (0-180), embedded conversion
-		meas_angles : out std_logic_vector(63 downto 0);
+		-- results: 9 measured angles (0-180), embedded conversion
+		meas_angles : out std_logic_vector(71 downto 0);
 		meas_valid  : out std_logic;
 		config_done : out std_logic
 	);
@@ -44,7 +44,7 @@ architecture rtl of ad7124_ctrl is
 		data_len : unsigned(1 downto 0);
 		data     : std_logic_vector(23 downto 0);
 	end record;
-	type init_array_t is array (0 to 10) of init_entry_t;
+	type init_array_t is array (0 to 11) of init_entry_t;
 
 	-- AD7124 register addresses from no-OS driver
 	-- Channel regs: enable + setup0 + AINP=N + AINM=17(AVSS)
@@ -70,7 +70,9 @@ architecture rtl of ad7124_ctrl is
 		-- Channel 6: enable, setup0, AINP=6, AINM=17
 		9  => (addr => "001111", data_len => "01", data => x"0080D1"),
 		-- Channel 7: enable, setup0, AINP=7, AINM=17
-		10 => (addr => "010000", data_len => "01", data => x"0080F1")
+		10 => (addr => "010000", data_len => "01", data => x"0080F1"),
+		-- Channel 8: enable, setup0, AINP=8, AINM=17
+		11 => (addr => "010001", data_len => "01", data => x"008111")
 	);
 
 	signal init_idx    : unsigned(3 downto 0) := (others => '0');
@@ -81,10 +83,10 @@ architecture rtl of ad7124_ctrl is
 	signal read_byte_cnt : unsigned(1 downto 0) := (others => '0');
 	signal adc_raw       : std_logic_vector(23 downto 0) := (others => '0');
 	signal status_byte   : std_logic_vector(7 downto 0) := (others => '0');
-	signal channels_read : std_logic_vector(7 downto 0) := (others => '0');
+	signal channels_read : std_logic_vector(8 downto 0) := (others => '0');
 
 	-- stored angles per channel
-	type angle_array_t is array (0 to 7) of std_logic_vector(7 downto 0);
+	type angle_array_t is array (0 to 8) of std_logic_vector(7 downto 0);
 	signal angles : angle_array_t := (others => (others => '0'));
 
 	signal cs_held_low : std_logic := '1';
@@ -179,7 +181,7 @@ begin
 						if spi_done = '1' then
 							if byte_idx = 0 then
 								cs_held_low <= '1';
-								if init_idx = 10 then
+								if init_idx = 11 then
 									cfg_done_r <= '1';
 									state      <= S_READ_POLL;
 									cs_held_low <= '0';
@@ -250,27 +252,28 @@ begin
 						angle_calc := resize(adc_val * to_unsigned(180, 8), 32);
 						ch_num     := to_integer(unsigned(status_byte(3 downto 0)));
 
-						if ch_num < 8 then
+						if ch_num < 9 then
 							angles(ch_num) <= std_logic_vector(angle_calc(31 downto 24));
 							channels_read(ch_num) <= '1';
 						end if;
 
-						if channels_read = "11111111" then
+						if channels_read = "111111111" then
 							state <= S_DONE_CYCLE;
 						else
 							state <= S_READ_POLL;
 						end if;
 
 					when S_DONE_CYCLE =>
-						-- output all 8 angles
-						meas_angles(63 downto 56) <= angles(0);
-						meas_angles(55 downto 48) <= angles(1);
-						meas_angles(47 downto 40) <= angles(2);
-						meas_angles(39 downto 32) <= angles(3);
-						meas_angles(31 downto 24) <= angles(4);
-						meas_angles(23 downto 16) <= angles(5);
-						meas_angles(15 downto  8) <= angles(6);
-						meas_angles( 7 downto  0) <= angles(7);
+						-- output all 9 angles
+						meas_angles(71 downto 64) <= angles(0);
+						meas_angles(63 downto 56) <= angles(1);
+						meas_angles(55 downto 48) <= angles(2);
+						meas_angles(47 downto 40) <= angles(3);
+						meas_angles(39 downto 32) <= angles(4);
+						meas_angles(31 downto 24) <= angles(5);
+						meas_angles(23 downto 16) <= angles(6);
+						meas_angles(15 downto  8) <= angles(7);
+						meas_angles( 7 downto  0) <= angles(8);
 						meas_valid    <= '1';
 						channels_read <= (others => '0');
 						state         <= S_READ_POLL;

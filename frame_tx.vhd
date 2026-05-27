@@ -7,7 +7,7 @@ entity frame_tx is
 		clk        : in  std_logic;
 		rst        : in  std_logic;
 		-- frame to send
-		angles_in  : in  std_logic_vector(63 downto 0);
+		angles_in  : in  std_logic_vector(71 downto 0);
 		send_start : in  std_logic;
 		-- uart_tx interface
 		tx_data    : out std_logic_vector(7 downto 0);
@@ -22,8 +22,8 @@ architecture rtl of frame_tx is
 	type state_t is (S_IDLE, S_SEND_DIR, S_WAIT_DIR, S_SEND_DATA, S_WAIT_DATA,
 	                 S_SEND_CHKSUM, S_WAIT_CHKSUM);
 	signal state      : state_t := S_IDLE;
-	signal byte_idx   : unsigned(2 downto 0) := (others => '0');
-	signal angles_reg : std_logic_vector(63 downto 0) := (others => '0');
+	signal byte_idx   : unsigned(3 downto 0) := (others => '0');
+	signal angles_reg : std_logic_vector(71 downto 0) := (others => '0');
 	signal xor_acc    : std_logic_vector(7 downto 0) := (others => '0');
 begin
 
@@ -58,18 +58,18 @@ begin
 
 					when S_SEND_DATA =>
 						if tx_busy = '0' then
-							tx_data  <= angles_reg(63 - to_integer(byte_idx)*8 downto
-							                       56 - to_integer(byte_idx)*8);
+							tx_data  <= angles_reg(71 - to_integer(byte_idx)*8 downto
+							                       64 - to_integer(byte_idx)*8);
 							tx_start <= '1';
 							xor_acc  <= xor_acc xor
-							            angles_reg(63 - to_integer(byte_idx)*8 downto
-							                       56 - to_integer(byte_idx)*8);
+							            angles_reg(71 - to_integer(byte_idx)*8 downto
+							                       64 - to_integer(byte_idx)*8);
 							state    <= S_WAIT_DATA;
 						end if;
 
 					when S_WAIT_DATA =>
 						if tx_busy = '0' then
-							if byte_idx = 7 then
+							if byte_idx = 8 then
 								state <= S_SEND_CHKSUM;
 							else
 								byte_idx <= byte_idx + 1;
