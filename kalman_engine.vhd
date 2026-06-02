@@ -28,12 +28,17 @@ architecture rtl of kalman_engine is
 	constant Q11      : signed(31 downto 0) := to_signed(6554, 32);   -- 0.1 (deg/s)^2
 	constant R_NOISE  : signed(31 downto 0) := to_signed(65536, 32);  -- 1.0 deg^2
 	constant P_INIT   : signed(31 downto 0) := to_signed(655360, 32); -- 10.0
+	constant BYPASS_THRESH : signed(31 downto 0) := to_signed(1966080, 32); -- 30 deg in Q16.16
+	constant MAX_VEL       : signed(31 downto 0) := to_signed(65536000, 32);  -- 1000 deg/s in Q16.16
+	constant MIN_X0        : signed(31 downto 0) := to_signed(0, 32);          -- 0 deg
+	constant MAX_X0        : signed(31 downto 0) := to_signed(11796480, 32);   -- 180 deg in Q16.16
 
 	-- state RAM: 8 channels x 5 words (x0, x1, P00, P01, P11)
 	type ram_t is array (0 to 39) of signed(31 downto 0);
 	signal state_ram : ram_t := (others => (others => '0'));
 
 	signal initialized : std_logic := '0';
+	signal first_run   : std_logic := '1';
 	signal init_addr   : unsigned(5 downto 0) := (others => '0');
 
 	type fsm_t is (
@@ -77,12 +82,17 @@ architecture rtl of kalman_engine is
 	function get_angle_q16(vec : std_logic_vector(63 downto 0);
 	                       ch  : unsigned(2 downto 0))
 		return signed is
-		variable idx : integer;
-		variable ang : unsigned(7 downto 0);
+		variable idx     : integer;
+		variable ang     : unsigned(7 downto 0);
+		variable ang_int : integer;
 	begin
 		idx := (7 - to_integer(ch)) * 8;
 		ang := unsigned(vec(idx+7 downto idx));
-		return to_signed(to_integer(ang) * 65536, 32);
+		ang_int := to_integer(ang);
+		if ang_int > 180 then
+			ang_int := 180;
+		end if;
+		return to_signed(ang_int * 65536, 32);
 	end function;
 
 begin
@@ -110,6 +120,7 @@ begin
 				fsm         <= S_INIT_RAM;
 				channel     <= (others => '0');
 				initialized <= '0';
+				first_run   <= '1';
 				init_addr   <= (others => '0');
 			else
 				case fsm is
@@ -135,13 +146,22 @@ begin
 
 					when S_LOAD =>
 						base := ch_base(channel);
-						x0  <= state_ram(base + 0);
-						x1  <= state_ram(base + 1);
-						p00 <= state_ram(base + 2);
-						p01 <= state_ram(base + 3);
-						p11 <= state_ram(base + 4);
 						z_meas <= get_angle_q16(target_angles, channel);
-						fsm <= S_PREDICT_X;
+						if first_run = '1' then
+							x0  <= get_angle_q16(target_angles, channel);
+							x1  <= (others => '0');
+							p00 <= P_INIT;
+							p01 <= (others => '0');
+							p11 <= P_INIT;
+							fsm <= S_STORE;
+						else
+							x0  <= state_ram(base + 0);
+							x1  <= state_ram(base + 1);
+							p00 <= state_ram(base + 2);
+							p01 <= state_ram(base + 3);
+							p11 <= state_ram(base + 4);
+							fsm <= S_PREDICT_X;
+						end if;
 
 					when S_PREDICT_X =>
 						x0_pred <= x0 + mul_q16(DT_Q16, x1);
@@ -165,7 +185,17 @@ begin
 					when S_UPDATE_S =>
 						s_val   <= pp00 + R_NOISE;
 						y_innov <= z_meas - x0_pred;
-						fsm     <= S_UPDATE_K0;
+						if (z_meas - x0_pred) > BYPASS_THRESH or
+						   (z_meas - x0_pred) < -BYPASS_THRESH then
+							x0  <= z_meas;
+							x1  <= (others => '0');
+							p00 <= P_INIT;
+							p01 <= (others => '0');
+							p11 <= P_INIT;
+							fsm <= S_STORE;
+						else
+							fsm <= S_UPDATE_K0;
+						end if;
 
 					when S_UPDATE_K0 =>
 						if s_val /= 0 then
@@ -188,12 +218,30 @@ begin
 					when S_UPDATE_X =>
 						x0 <= x0_pred + mul_q16(k0, y_innov);
 						x1 <= x1_pred + mul_q16(k1, y_innov);
+						if (x0_pred + mul_q16(k0, y_innov)) < MIN_X0 then
+							x0 <= MIN_X0;
+						elsif (x0_pred + mul_q16(k0, y_innov)) > MAX_X0 then
+							x0 <= MAX_X0;
+						end if;
+						if (x1_pred + mul_q16(k1, y_innov)) > MAX_VEL then
+							x1 <= MAX_VEL;
+						elsif (x1_pred + mul_q16(k1, y_innov)) < -MAX_VEL then
+							x1 <= -MAX_VEL;
+						end if;
 						fsm <= S_UPDATE_P;
 
 					when S_UPDATE_P =>
-						p00 <= mul_q16(ONE_Q16 - k0, pp00);
+						if mul_q16(ONE_Q16 - k0, pp00) < to_signed(1, 32) then
+							p00 <= to_signed(1, 32);
+						else
+							p00 <= mul_q16(ONE_Q16 - k0, pp00);
+						end if;
 						p01 <= mul_q16(ONE_Q16 - k0, pp01);
-						p11 <= mul_q16(-k1, pp01) + pp11;
+						if (mul_q16(-k1, pp01) + pp11) < to_signed(1, 32) then
+							p11 <= to_signed(1, 32);
+						else
+							p11 <= mul_q16(-k1, pp01) + pp11;
+						end if;
 						fsm <= S_STORE;
 
 					when S_STORE =>
@@ -228,6 +276,7 @@ begin
 					when S_OUTPUT =>
 						output_angles <= out_reg;
 						output_valid  <= '1';
+						first_run     <= '0';
 						fsm           <= S_IDLE;
 
 				end case;
