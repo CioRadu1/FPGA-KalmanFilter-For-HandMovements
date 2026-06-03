@@ -8,32 +8,25 @@ entity kalman_engine is
 		rst           : in  std_logic;
 		tick_20ms     : in  std_logic;
 		target_angles : in  std_logic_vector(63 downto 0);
-		meas_angles   : in  std_logic_vector(63 downto 0);
-		meas_valid    : in  std_logic;
 		output_angles : out std_logic_vector(63 downto 0);
 		output_valid  : out std_logic;
 		busy          : out std_logic
 	);
 end entity;
 
--- 2-state Kalman filter: x = [position, velocity]
--- Q16.16 fixed-point (32-bit signed)
--- time-multiplexed over 8 servo channels
-
 architecture rtl of kalman_engine is
 
-	constant ONE_Q16  : signed(31 downto 0) := to_signed(65536, 32);
-	constant DT_Q16   : signed(31 downto 0) := to_signed(1311, 32);   -- 0.02s
-	constant Q00      : signed(31 downto 0) := to_signed(655, 32);    -- 0.01 deg^2
-	constant Q11      : signed(31 downto 0) := to_signed(6554, 32);   -- 0.1 (deg/s)^2
-	constant R_NOISE  : signed(31 downto 0) := to_signed(65536, 32);  -- 1.0 deg^2
-	constant P_INIT   : signed(31 downto 0) := to_signed(655360, 32); -- 10.0
-	constant BYPASS_THRESH : signed(31 downto 0) := to_signed(1966080, 32); -- 30 deg in Q16.16
-	constant MAX_VEL       : signed(31 downto 0) := to_signed(65536000, 32);  -- 1000 deg/s in Q16.16
-	constant MIN_X0        : signed(31 downto 0) := to_signed(0, 32);          -- 0 deg
-	constant MAX_X0        : signed(31 downto 0) := to_signed(11796480, 32);   -- 180 deg in Q16.16
+	constant ONE_Q16       : signed(31 downto 0) := to_signed(65536, 32);
+	constant DT_Q16        : signed(31 downto 0) := to_signed(1311, 32);
+	constant Q00           : signed(31 downto 0) := to_signed(655, 32);
+	constant Q11           : signed(31 downto 0) := to_signed(6554, 32);
+	constant R_NOISE       : signed(31 downto 0) := to_signed(65536, 32);
+	constant P_INIT        : signed(31 downto 0) := to_signed(655360, 32);
+	constant BYPASS_THRESH : signed(31 downto 0) := to_signed(1966080, 32);
+	constant MAX_VEL       : signed(31 downto 0) := to_signed(65536000, 32);
+	constant MIN_X0        : signed(31 downto 0) := to_signed(0, 32);
+	constant MAX_X0        : signed(31 downto 0) := to_signed(11796480, 32);
 
-	-- state RAM: 8 channels x 5 words (x0, x1, P00, P01, P11)
 	type ram_t is array (0 to 39) of signed(31 downto 0);
 	signal state_ram : ram_t := (others => (others => '0'));
 
@@ -42,11 +35,18 @@ architecture rtl of kalman_engine is
 	signal init_addr   : unsigned(5 downto 0) := (others => '0');
 
 	type fsm_t is (
-		S_IDLE, S_INIT_RAM,
-		S_LOAD, S_PREDICT_X,
-		S_PREDICT_P00, S_PREDICT_P01, S_PREDICT_P11,
-		S_UPDATE_S, S_UPDATE_K0, S_UPDATE_K1,
-		S_UPDATE_X, S_UPDATE_P,
+		S_IDLE, S_INIT_RAM, S_LOAD,
+		S_PREDICT_X,
+		S_PREDICT_DT, S_PREDICT_P00A, S_PREDICT_P00B, S_PREDICT_P00C,
+		S_PREDICT_P11,
+		S_UPDATE_S,
+		S_DIV_K0_START, S_DIV_K0_WAIT,
+		S_DIV_K1_START, S_DIV_K1_WAIT,
+		S_UPDATE_X0, S_CLAMP_X0,
+		S_UPDATE_X1, S_CLAMP_X1,
+		S_UPDATE_P00, S_CLAMP_P00,
+		S_UPDATE_P01,
+		S_UPDATE_P11, S_CLAMP_P11,
 		S_STORE, S_NEXT_CH, S_OUTPUT
 	);
 	signal fsm : fsm_t := S_INIT_RAM;
@@ -63,8 +63,28 @@ architecture rtl of kalman_engine is
 	signal y_innov : signed(31 downto 0) := (others => '0');
 	signal z_meas  : signed(31 downto 0) := (others => '0');
 
-	signal meas_reg : std_logic_vector(63 downto 0) := (others => '0');
-	signal out_reg  : std_logic_vector(63 downto 0) := (others => '0');
+	signal dt_p01  : signed(31 downto 0) := (others => '0');
+	signal dt_p11  : signed(31 downto 0) := (others => '0');
+	signal tmp     : signed(31 downto 0) := (others => '0');
+
+	signal out_reg : std_logic_vector(63 downto 0) := (others => '0');
+
+	signal div_start    : std_logic := '0';
+	signal div_dividend : signed(63 downto 0) := (others => '0');
+	signal div_divisor  : signed(63 downto 0) := (others => '0');
+	signal div_quotient : signed(31 downto 0);
+	signal div_done     : std_logic;
+
+	component divider is
+		port (
+			clk      : in  std_logic;
+			start    : in  std_logic;
+			dividend : in  signed(63 downto 0);
+			divisor  : in  signed(63 downto 0);
+			quotient : out signed(31 downto 0);
+			done     : out std_logic
+		);
+	end component;
 
 	function mul_q16(a : signed(31 downto 0); b : signed(31 downto 0))
 		return signed is
@@ -97,24 +117,23 @@ architecture rtl of kalman_engine is
 
 begin
 
-	process(clk)
-	begin
-		if rising_edge(clk) then
-			if rst = '1' then
-				meas_reg <= (others => '0');
-			elsif meas_valid = '1' then
-				meas_reg <= meas_angles;
-			end if;
-		end if;
-	end process;
+	u_div : divider
+		port map (
+			clk      => clk,
+			start    => div_start,
+			dividend => div_dividend,
+			divisor  => div_divisor,
+			quotient => div_quotient,
+			done     => div_done
+		);
 
 	process(clk)
 		variable base         : integer;
-		variable tmp64        : signed(63 downto 0);
 		variable result_angle : integer;
 	begin
 		if rising_edge(clk) then
 			output_valid <= '0';
+			div_start    <= '0';
 
 			if rst = '1' then
 				fsm         <= S_INIT_RAM;
@@ -163,25 +182,40 @@ begin
 							fsm <= S_PREDICT_X;
 						end if;
 
+					-- x0_pred = x0 + dt*x1, x1_pred = x1
 					when S_PREDICT_X =>
 						x0_pred <= x0 + mul_q16(DT_Q16, x1);
 						x1_pred <= x1;
-						fsm <= S_PREDICT_P00;
+						fsm     <= S_PREDICT_DT;
 
-					when S_PREDICT_P00 =>
-						pp00 <= p00 + mul_q16(DT_Q16, p01) +
-						        mul_q16(DT_Q16, p01) +
-						        mul_q16(DT_Q16, mul_q16(DT_Q16, p11)) + Q00;
-						fsm <= S_PREDICT_P01;
+					-- pre-compute dt*p01 and dt*p11
+					when S_PREDICT_DT =>
+						dt_p01 <= mul_q16(DT_Q16, p01);
+						dt_p11 <= mul_q16(DT_Q16, p11);
+						fsm    <= S_PREDICT_P00A;
 
-					when S_PREDICT_P01 =>
-						pp01 <= p01 + mul_q16(DT_Q16, p11);
-						fsm  <= S_PREDICT_P11;
+					-- pp00 = p00 + 2*dt*p01 + dt^2*p11 + Q00
+					-- step A: pp00 = p00 + dt_p01 + dt_p01 (just adds, no multiply)
+					when S_PREDICT_P00A =>
+						pp00 <= p00 + dt_p01 + dt_p01;
+						pp01 <= p01 + dt_p11;
+						fsm  <= S_PREDICT_P00B;
 
-					when S_PREDICT_P11 =>
+					-- step B: tmp = dt*dt_p11 (multiply only, store result)
+					when S_PREDICT_P00B =>
+						tmp <= mul_q16(DT_Q16, dt_p11);
+						fsm <= S_PREDICT_P00C;
+
+					-- step C: pp00 += tmp + Q00 (additions only)
+					when S_PREDICT_P00C =>
+						pp00 <= pp00 + tmp + Q00;
 						pp11 <= p11 + Q11;
 						fsm  <= S_UPDATE_S;
 
+					when S_PREDICT_P11 =>
+						fsm <= S_UPDATE_S;
+
+					-- innovation and bypass check
 					when S_UPDATE_S =>
 						s_val   <= pp00 + R_NOISE;
 						y_innov <= z_meas - x0_pred;
@@ -194,56 +228,91 @@ begin
 							p11 <= P_INIT;
 							fsm <= S_STORE;
 						else
-							fsm <= S_UPDATE_K0;
+							fsm <= S_DIV_K0_START;
 						end if;
 
-					when S_UPDATE_K0 =>
-						if s_val /= 0 then
-							tmp64 := shift_left(resize(pp00, 64), 16);
-							k0 <= resize(tmp64 / resize(s_val, 64), 32);
-						else
-							k0 <= ONE_Q16;
-						end if;
-						fsm <= S_UPDATE_K1;
+					-- K0 = pp00 / s_val (Q16.16 division)
+					when S_DIV_K0_START =>
+						div_dividend <= shift_left(resize(pp00, 64), 16);
+						div_divisor  <= resize(s_val, 64);
+						div_start    <= '1';
+						fsm          <= S_DIV_K0_WAIT;
 
-					when S_UPDATE_K1 =>
-						if s_val /= 0 then
-							tmp64 := shift_left(resize(pp01, 64), 16);
-							k1 <= resize(tmp64 / resize(s_val, 64), 32);
-						else
-							k1 <= (others => '0');
+					when S_DIV_K0_WAIT =>
+						if div_done = '1' then
+							k0  <= div_quotient;
+							fsm <= S_DIV_K1_START;
 						end if;
-						fsm <= S_UPDATE_X;
 
-					when S_UPDATE_X =>
-						x0 <= x0_pred + mul_q16(k0, y_innov);
-						x1 <= x1_pred + mul_q16(k1, y_innov);
-						if (x0_pred + mul_q16(k0, y_innov)) < MIN_X0 then
+					-- K1 = pp01 / s_val
+					when S_DIV_K1_START =>
+						div_dividend <= shift_left(resize(pp01, 64), 16);
+						div_divisor  <= resize(s_val, 64);
+						div_start    <= '1';
+						fsm          <= S_DIV_K1_WAIT;
+
+					when S_DIV_K1_WAIT =>
+						if div_done = '1' then
+							k1  <= div_quotient;
+							fsm <= S_UPDATE_X0;
+						end if;
+
+					-- x0 = x0_pred + K0*y (one multiply only)
+					when S_UPDATE_X0 =>
+						x0  <= x0_pred + mul_q16(k0, y_innov);
+						fsm <= S_CLAMP_X0;
+
+					-- clamp x0 to 0..180 (comparisons only, no multiply)
+					when S_CLAMP_X0 =>
+						if x0 < MIN_X0 then
 							x0 <= MIN_X0;
-						elsif (x0_pred + mul_q16(k0, y_innov)) > MAX_X0 then
+						elsif x0 > MAX_X0 then
 							x0 <= MAX_X0;
 						end if;
-						if (x1_pred + mul_q16(k1, y_innov)) > MAX_VEL then
+						fsm <= S_UPDATE_X1;
+
+					-- x1 = x1_pred + K1*y
+					when S_UPDATE_X1 =>
+						x1  <= x1_pred + mul_q16(k1, y_innov);
+						fsm <= S_CLAMP_X1;
+
+					-- clamp x1 to +/- MAX_VEL
+					when S_CLAMP_X1 =>
+						if x1 > MAX_VEL then
 							x1 <= MAX_VEL;
-						elsif (x1_pred + mul_q16(k1, y_innov)) < -MAX_VEL then
+						elsif x1 < -MAX_VEL then
 							x1 <= -MAX_VEL;
 						end if;
-						fsm <= S_UPDATE_P;
+						fsm <= S_UPDATE_P00;
 
-					when S_UPDATE_P =>
-						if mul_q16(ONE_Q16 - k0, pp00) < to_signed(1, 32) then
+					-- p00 = (1-K0)*pp00
+					when S_UPDATE_P00 =>
+						p00 <= mul_q16(ONE_Q16 - k0, pp00);
+						fsm <= S_CLAMP_P00;
+
+					when S_CLAMP_P00 =>
+						if p00 < to_signed(1, 32) then
 							p00 <= to_signed(1, 32);
-						else
-							p00 <= mul_q16(ONE_Q16 - k0, pp00);
 						end if;
+						fsm <= S_UPDATE_P01;
+
+					-- p01 = (1-K0)*pp01
+					when S_UPDATE_P01 =>
 						p01 <= mul_q16(ONE_Q16 - k0, pp01);
-						if (mul_q16(-k1, pp01) + pp11) < to_signed(1, 32) then
+						fsm <= S_UPDATE_P11;
+
+					-- p11 = -K1*pp01 + pp11
+					when S_UPDATE_P11 =>
+						p11 <= mul_q16(-k1, pp01) + pp11;
+						fsm <= S_CLAMP_P11;
+
+					when S_CLAMP_P11 =>
+						if p11 < to_signed(1, 32) then
 							p11 <= to_signed(1, 32);
-						else
-							p11 <= mul_q16(-k1, pp01) + pp11;
 						end if;
 						fsm <= S_STORE;
 
+					-- store results to RAM, convert to 8-bit angle
 					when S_STORE =>
 						base := ch_base(channel);
 						state_ram(base + 0) <= x0;

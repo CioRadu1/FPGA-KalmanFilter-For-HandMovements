@@ -283,8 +283,6 @@ begin
 			rst           => rst,
 			tick_20ms     => tick_20ms,
 			target_angles => target_angles,
-			meas_angles   => meas_angles,
-			meas_valid    => meas_valid,
 			output_angles => kalman_out,
 			output_valid  => kalman_valid,
 			busy          => kalman_busy
