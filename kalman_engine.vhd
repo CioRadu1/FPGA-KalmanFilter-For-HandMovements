@@ -38,7 +38,6 @@ architecture rtl of kalman_engine is
 		S_IDLE, S_INIT_RAM, S_LOAD,
 		S_PREDICT_X,
 		S_PREDICT_DT, S_PREDICT_P00A, S_PREDICT_P00B, S_PREDICT_P00C,
-		S_PREDICT_P11,
 		S_UPDATE_S,
 		S_DIV_K0_START, S_DIV_K0_WAIT,
 		S_DIV_K1_START, S_DIV_K1_WAIT,
@@ -211,9 +210,6 @@ begin
 						pp00 <= pp00 + tmp + Q00;
 						pp11 <= p11 + Q11;
 						fsm  <= S_UPDATE_S;
-
-					when S_PREDICT_P11 =>
-						fsm <= S_UPDATE_S;
 
 					-- innovation and bypass check
 					when S_UPDATE_S =>
