@@ -27,12 +27,19 @@ architecture rtl of kalman_engine is
 	constant MIN_X0        : signed(31 downto 0) := to_signed(0, 32);
 	constant MAX_X0        : signed(31 downto 0) := to_signed(11796480, 32);
 
-	type ram_t is array (0 to 39) of signed(31 downto 0);
-	signal state_ram : ram_t := (others => (others => '0'));
+	-- state stored as 5 separate per-channel RAMs (8 entries each).
+	-- Splitting avoids a single 40-deep RAM that won't map to BRAM and
+	-- forces a huge read/write mux (timing killer).
+	type ch_ram_t is array (0 to 7) of signed(31 downto 0);
+	signal x0_ram  : ch_ram_t := (others => (others => '0'));
+	signal x1_ram  : ch_ram_t := (others => (others => '0'));
+	signal p00_ram : ch_ram_t := (others => (others => '0'));
+	signal p01_ram : ch_ram_t := (others => (others => '0'));
+	signal p11_ram : ch_ram_t := (others => (others => '0'));
 
 	signal initialized : std_logic := '0';
 	signal first_run   : std_logic := '1';
-	signal init_addr   : unsigned(5 downto 0) := (others => '0');
+	signal init_addr   : unsigned(3 downto 0) := (others => '0');
 
 	type fsm_t is (
 		S_IDLE, S_INIT_RAM, S_LOAD,
@@ -41,11 +48,11 @@ architecture rtl of kalman_engine is
 		S_UPDATE_S,
 		S_DIV_K0_START, S_DIV_K0_WAIT,
 		S_DIV_K1_START, S_DIV_K1_WAIT,
-		S_UPDATE_X0, S_CLAMP_X0,
-		S_UPDATE_X1, S_CLAMP_X1,
+		S_UPDATE_X0A, S_UPDATE_X0B, S_CLAMP_X0,
+		S_UPDATE_X1A, S_UPDATE_X1B, S_CLAMP_X1,
 		S_UPDATE_P00, S_CLAMP_P00,
 		S_UPDATE_P01,
-		S_UPDATE_P11, S_CLAMP_P11,
+		S_UPDATE_P11A, S_UPDATE_P11B, S_CLAMP_P11,
 		S_STORE, S_NEXT_CH, S_OUTPUT
 	);
 	signal fsm : fsm_t := S_INIT_RAM;
@@ -65,6 +72,7 @@ architecture rtl of kalman_engine is
 	signal dt_p01  : signed(31 downto 0) := (others => '0');
 	signal dt_p11  : signed(31 downto 0) := (others => '0');
 	signal tmp     : signed(31 downto 0) := (others => '0');
+	signal mul_res : signed(31 downto 0) := (others => '0');
 
 	signal out_reg : std_logic_vector(63 downto 0) := (others => '0');
 
@@ -91,11 +99,6 @@ architecture rtl of kalman_engine is
 	begin
 		product := a * b;
 		return product(47 downto 16);
-	end function;
-
-	function ch_base(ch : unsigned(2 downto 0)) return integer is
-	begin
-		return to_integer(ch) * 5;
 	end function;
 
 	function get_angle_q16(vec : std_logic_vector(63 downto 0);
@@ -127,7 +130,6 @@ begin
 		);
 
 	process(clk)
-		variable base         : integer;
 		variable result_angle : integer;
 	begin
 		if rising_edge(clk) then
@@ -144,12 +146,13 @@ begin
 				case fsm is
 
 					when S_INIT_RAM =>
-						case to_integer(init_addr mod 5) is
-							when 2     => state_ram(to_integer(init_addr)) <= P_INIT;
-							when 4     => state_ram(to_integer(init_addr)) <= P_INIT;
-							when others => state_ram(to_integer(init_addr)) <= (others => '0');
-						end case;
-						if init_addr = 39 then
+						-- init all 8 channels: x0=x1=0, P00=P11=P_INIT, P01=0
+						x0_ram(to_integer(init_addr(2 downto 0)))  <= (others => '0');
+						x1_ram(to_integer(init_addr(2 downto 0)))  <= (others => '0');
+						p00_ram(to_integer(init_addr(2 downto 0))) <= P_INIT;
+						p01_ram(to_integer(init_addr(2 downto 0))) <= (others => '0');
+						p11_ram(to_integer(init_addr(2 downto 0))) <= P_INIT;
+						if init_addr = 7 then
 							initialized <= '1';
 							fsm         <= S_IDLE;
 						else
@@ -163,7 +166,6 @@ begin
 						end if;
 
 					when S_LOAD =>
-						base := ch_base(channel);
 						z_meas <= get_angle_q16(target_angles, channel);
 						if first_run = '1' then
 							x0  <= get_angle_q16(target_angles, channel);
@@ -173,11 +175,11 @@ begin
 							p11 <= P_INIT;
 							fsm <= S_STORE;
 						else
-							x0  <= state_ram(base + 0);
-							x1  <= state_ram(base + 1);
-							p00 <= state_ram(base + 2);
-							p01 <= state_ram(base + 3);
-							p11 <= state_ram(base + 4);
+							x0  <= x0_ram(to_integer(channel));
+							x1  <= x1_ram(to_integer(channel));
+							p00 <= p00_ram(to_integer(channel));
+							p01 <= p01_ram(to_integer(channel));
+							p11 <= p11_ram(to_integer(channel));
 							fsm <= S_PREDICT_X;
 						end if;
 
@@ -250,12 +252,16 @@ begin
 					when S_DIV_K1_WAIT =>
 						if div_done = '1' then
 							k1  <= div_quotient;
-							fsm <= S_UPDATE_X0;
+							fsm <= S_UPDATE_X0A;
 						end if;
 
-					-- x0 = x0_pred + K0*y (one multiply only)
-					when S_UPDATE_X0 =>
-						x0  <= x0_pred + mul_q16(k0, y_innov);
+					-- x0 = x0_pred + K0*y : split multiply and add
+					when S_UPDATE_X0A =>
+						mul_res <= mul_q16(k0, y_innov);
+						fsm     <= S_UPDATE_X0B;
+
+					when S_UPDATE_X0B =>
+						x0  <= x0_pred + mul_res;
 						fsm <= S_CLAMP_X0;
 
 					-- clamp x0 to 0..180 (comparisons only, no multiply)
@@ -265,11 +271,15 @@ begin
 						elsif x0 > MAX_X0 then
 							x0 <= MAX_X0;
 						end if;
-						fsm <= S_UPDATE_X1;
+						fsm <= S_UPDATE_X1A;
 
-					-- x1 = x1_pred + K1*y
-					when S_UPDATE_X1 =>
-						x1  <= x1_pred + mul_q16(k1, y_innov);
+					-- x1 = x1_pred + K1*y : split multiply and add
+					when S_UPDATE_X1A =>
+						mul_res <= mul_q16(k1, y_innov);
+						fsm     <= S_UPDATE_X1B;
+
+					when S_UPDATE_X1B =>
+						x1  <= x1_pred + mul_res;
 						fsm <= S_CLAMP_X1;
 
 					-- clamp x1 to +/- MAX_VEL
@@ -295,11 +305,15 @@ begin
 					-- p01 = (1-K0)*pp01
 					when S_UPDATE_P01 =>
 						p01 <= mul_q16(ONE_Q16 - k0, pp01);
-						fsm <= S_UPDATE_P11;
+						fsm <= S_UPDATE_P11A;
 
-					-- p11 = -K1*pp01 + pp11
-					when S_UPDATE_P11 =>
-						p11 <= mul_q16(-k1, pp01) + pp11;
+					-- p11 = -K1*pp01 + pp11 : split multiply and add
+					when S_UPDATE_P11A =>
+						mul_res <= mul_q16(-k1, pp01);
+						fsm     <= S_UPDATE_P11B;
+
+					when S_UPDATE_P11B =>
+						p11 <= mul_res + pp11;
 						fsm <= S_CLAMP_P11;
 
 					when S_CLAMP_P11 =>
@@ -310,12 +324,11 @@ begin
 
 					-- store results to RAM, convert to 8-bit angle
 					when S_STORE =>
-						base := ch_base(channel);
-						state_ram(base + 0) <= x0;
-						state_ram(base + 1) <= x1;
-						state_ram(base + 2) <= p00;
-						state_ram(base + 3) <= p01;
-						state_ram(base + 4) <= p11;
+						x0_ram(to_integer(channel))  <= x0;
+						x1_ram(to_integer(channel))  <= x1;
+						p00_ram(to_integer(channel)) <= p00;
+						p01_ram(to_integer(channel)) <= p01;
+						p11_ram(to_integer(channel)) <= p11;
 
 						result_angle := to_integer(shift_right(x0, 16));
 						if result_angle < 0 then

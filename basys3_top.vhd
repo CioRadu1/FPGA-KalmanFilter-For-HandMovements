@@ -109,7 +109,19 @@ architecture Behavioral of basys3_top is
 	signal pwm_out       : std_logic_vector(7 downto 0);
 	signal send_readback : std_logic;
 
+	-- unghiurile efectiv trimise la PWM: identice cu kalman_out, exceptand
+	-- canalul 4 (police-palma), al carui servomotor are sens invers montat.
+	-- Comanda 0-180 (conventia sistemului) e scalata la 0-90 pentru acest canal.
+	signal pwm_angles : std_logic_vector(63 downto 0);
+
 begin
+
+	-- remapare canal 4: scalare 0-180 -> 0-90 (impartire la 2)
+	-- canalele 0-3 ocupa bitii 63..32, canalul 4 bitii 31..24, 5-7 bitii 23..0
+	pwm_angles(63 downto 32) <= kalman_out(63 downto 32);
+	pwm_angles(31 downto 24) <=
+		std_logic_vector(shift_right(unsigned(kalman_out(31 downto 24)), 1));
+	pwm_angles(23 downto 0)  <= kalman_out(23 downto 0);
 
 	rst <= btnC;
 
@@ -293,7 +305,7 @@ begin
 			port map (
 				clk     => clk,
 				rst     => rst,
-				angle   => kalman_out((7-i)*8+7 downto (7-i)*8),
+				angle   => pwm_angles((7-i)*8+7 downto (7-i)*8),
 				pwm_out => pwm_out(i)
 			);
 	end generate;
