@@ -90,6 +90,7 @@ architecture Behavioral of basys3_top is
 	signal mb_wr_valid : std_logic;
 
 	signal demo_angles   : std_logic_vector(63 downto 0);
+	signal manual_angles : std_logic_vector(63 downto 0);
 	signal target_angles : std_logic_vector(63 downto 0);
 
 	signal spi_start_sig  : std_logic;
@@ -116,6 +117,18 @@ architecture Behavioral of basys3_top is
 	signal pwm_angles : std_logic_vector(63 downto 0);
 
 begin
+
+	-- mod manual: fiecare switch comanda un servo (ON = 180 grade, OFF = 0 grade)
+	-- sw1..sw8 -> servo 0..7 (pinky, ring, middle, index, police-palma,
+	--                         police-tensiune, incheietura, cot)
+	manual_angles(63 downto 56) <= x"B4" when sw(1) = '1' else x"00"; -- servo 0
+	manual_angles(55 downto 48) <= x"B4" when sw(2) = '1' else x"00"; -- servo 1
+	manual_angles(47 downto 40) <= x"B4" when sw(3) = '1' else x"00"; -- servo 2
+	manual_angles(39 downto 32) <= x"B4" when sw(4) = '1' else x"00"; -- servo 3
+	manual_angles(31 downto 24) <= x"B4" when sw(5) = '1' else x"00"; -- servo 4
+	manual_angles(23 downto 16) <= x"B4" when sw(6) = '1' else x"00"; -- servo 5
+	manual_angles(15 downto  8) <= x"B4" when sw(7) = '1' else x"00"; -- servo 6
+	manual_angles( 7 downto  0) <= x"B4" when sw(8) = '1' else x"00"; -- servo 7
 
 	-- remapare canal 4: inversare + scalare, iesire = 90 - (comanda / 2)
 	-- canalele 0-3 ocupa bitii 63..32, canalul 4 bitii 31..24, 5-7 bitii 23..0
@@ -252,13 +265,13 @@ begin
 			angles_out => demo_angles
 		);
 
-	u_mux : entity work.source_mux
-		port map (
-			demo_mode      => sw0,
-			mailbox_angles => mb_angles,
-			demo_angles    => demo_angles,
-			target_angles  => target_angles
-		);
+	-- selectia sursei de comanda:
+	--   sw(15) = 1 -> mod manual (comanda din switch-uri)
+	--   sw0    = 1 -> mod demonstrativ (secventa din ROM)
+	--   altfel     -> mod normal (unghiuri primite prin UART)
+	target_angles <= manual_angles when sw(15) = '1' else
+	                 demo_angles   when sw0 = '1' else
+	                 mb_angles;
 
 	u_spi : entity work.spi_master
 		port map (

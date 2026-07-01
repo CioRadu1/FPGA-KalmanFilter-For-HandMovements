@@ -16,10 +16,11 @@ architecture rtl of pwm_gen is
 	signal threshold : unsigned(20 downto 0);
 begin
 
-	-- 0 deg = 1.0ms = 100000 counts, 180 deg = 2.0ms = 200000 counts
-	-- threshold = 100000 + angle * 556 (556 ~= 100000/180)
-	threshold <= to_unsigned(100000, 21) +
-	             resize(unsigned(angle) * to_unsigned(556, 10), 21);
+	-- interval identic cu biblioteca Servo din Arduino (cea testata):
+	-- 0 deg = 544us = 54400 counts, 180 deg = 2400us = 240000 counts
+	-- threshold = 54400 + angle * 1031 (1031 ~= 185600/180)
+	threshold <= to_unsigned(54400, 21) +
+	             resize(unsigned(angle) * to_unsigned(1031, 11), 21);
 
 	process(clk)
 	begin
